@@ -306,8 +306,95 @@ function load_project_packages_into_store!(ssi::SymbolServerInstance, environmen
         end
     end
     manifest === nothing && return
-    uuids = values(deps(project))
-    num_uuids = length(values(deps(project)))
+
+    # Loading
+
+    # Special cases: docs, test, extensions and workspace projects
+    if hasproperty(project, :workspace)
+        workspace_projects = get(project.workspace, "projects", [])
+    else
+        workspace_projects = []
+    end
+    # Docs
+    if isdir(joinpath(environment_path, "docs")) && "docs" ∉ workspace_projects
+        progress_callback("Loading docs dependencies...", 0)
+        load_project_packages_into_store!(ssi, joinpath(environment_path, "docs"), store, progress_callback)
+    end
+    # DEPOT PATH
+    dp_before = copy(Base.DEPOT_PATH)
+    push!(empty!(Base.DEPOT_PATH), joinpath(homedir(), ".julia"))
+    # Test does not necessarily have its own manifest and it is often sandboxed
+    testdir = joinpath(environment_path, "test")
+    if isdir(testdir) && "test" ∉ workspace_projects
+        progress_callback("Loading test dependencies...", 0)
+        # Resolve manually to get the test dependencies
+        env = Pkg.Types.EnvCache(joinpath(testdir, "Project.toml"))
+        ctx = Pkg.Types.Context(env=env)
+        pkgs = Pkg.Types.PackageSpec[ctx.env.pkg]
+        try
+            pkgs, deps_map = Pkg.Operations.targeted_resolve(ctx.env, ctx.registries, pkgs, Pkg.Types.PRESERVE_ALL, ctx.julia_version)
+            Pkg.Operations.update_manifest!(ctx.env, pkgs, deps_map, ctx.julia_version)
+
+            uuids = values(deps(ctx.env.project))
+            num_uuids = length(uuids)
+            t0 = time()
+            for (i, uuid) in enumerate(uuids)
+                load_package_from_cache_into_store!(ssi, uuid isa UUID ? uuid : UUID(uuid), testdir, ctx.env.manifest.deps, store, progress_callback, round(Int, 100 * (i - 1) / num_uuids))
+            end
+            took = round(time() - t0, sigdigits=2)
+            progress_callback("Loaded all test packages into cache in $(took)s", 100)
+        catch err
+            @warn "Could not load test dependencies."
+            rethrow(err)
+        end
+    end
+    # Extensions need weakdeps, but they are not resolved in the project manifest
+    # Technically, we do not know the version of the weakdeps, so we cannot resolve
+    # them properly, but we can at least try to load something, assuming most up to date
+    # versions of the weakdeps
+    if !isempty(project.exts)
+        for (ext, weakdeps) in project.exts
+            if weakdeps isa String
+                weakdeps = [weakdeps]
+            end
+            env = Pkg.Types.EnvCache(joinpath(environment_path, "Project.toml"))
+            ctx = Pkg.Types.Context(env=env)
+            pkgs = Pkg.Types.PackageSpec[ctx.env.pkg]
+            for weakdep in weakdeps
+                push!(pkgs, Pkg.Types.PackageSpec(name=weakdep, uuid=project.weakdeps[weakdep]))
+            end
+            try
+                pkgs, deps_map = Pkg.Operations.targeted_resolve(ctx.env, ctx.registries, pkgs, Pkg.Types.PRESERVE_ALL, ctx.julia_version)
+                Pkg.Operations.update_manifest!(ctx.env, pkgs, deps_map, ctx.julia_version)
+
+                uuids = getindex.(Ref(project.weakdeps), weakdeps)
+                num_uuids = length(uuids)
+                t0 = time()
+                for (i, uuid) in enumerate(uuids)
+                    load_package_from_cache_into_store!(ssi, uuid isa UUID ? uuid : UUID(uuid), environment_path, ctx.env.manifest.deps, store, progress_callback, round(Int, 100 * (i - 1) / num_uuids))
+                end
+                took = round(time() - t0, sigdigits=2)
+                progress_callback("Loaded $ext's weakdeps into cache in $(took)s", 100)
+            catch err
+                @warn "Could not load weakdeps for extension $ext."
+                rethrow(err)
+            end
+        end
+    end
+    append!(empty!(Base.DEPOT_PATH), dp_before)
+
+    uuids = collect(values(deps(project)))
+    # Workspace has a unique manifest file, just add the uuids from each project
+    for name in workspace_projects
+        try
+            subproject = Pkg.API.read_project(joinpath(environment_path, name, "Project.toml"))
+            push!(uuids, values(deps(subproject))...)
+        catch err
+            @warn "Could not load workspace project $name"
+            continue
+        end
+    end
+    num_uuids = length(uuids)
     t0 = time()
     for (i, uuid) in enumerate(uuids)
         load_package_from_cache_into_store!(ssi, uuid isa UUID ? uuid : UUID(uuid), environment_path, manifest, store, progress_callback, round(Int, 100 * (i - 1) / num_uuids))
