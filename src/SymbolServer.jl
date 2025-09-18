@@ -330,7 +330,10 @@ function load_project_packages_into_store!(ssi::SymbolServerInstance, environmen
         # Resolve manually to get the test dependencies
         env = Pkg.Types.EnvCache(joinpath(testdir, "Project.toml"))
         ctx = Pkg.Types.Context(env=env)
-        pkgs = Pkg.Types.PackageSpec[ctx.env.pkg]
+        pkgs = Pkg.Types.PackageSpec[]
+        if !isnothing(ctx.env.pkg)
+            push!(pkgs, ctx.env.pkg)
+        end
         try
             pkgs, deps_map = Pkg.Operations.targeted_resolve(ctx.env, ctx.registries, pkgs, Pkg.Types.PRESERVE_ALL, ctx.julia_version)
             Pkg.Operations.update_manifest!(ctx.env, pkgs, deps_map, ctx.julia_version)
@@ -359,7 +362,10 @@ function load_project_packages_into_store!(ssi::SymbolServerInstance, environmen
             end
             env = Pkg.Types.EnvCache(joinpath(environment_path, "Project.toml"))
             ctx = Pkg.Types.Context(env=env)
-            pkgs = Pkg.Types.PackageSpec[ctx.env.pkg]
+            pkgs = Pkg.Types.PackageSpec[]
+            if !isnothing(ctx.env.pkg)
+                push!(pkgs, ctx.env.pkg)
+            end
             for weakdep in weakdeps
                 push!(pkgs, Pkg.Types.PackageSpec(name=weakdep, uuid=project.weakdeps[weakdep]))
             end
